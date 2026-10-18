@@ -125,9 +125,9 @@ def main():
             last_sent = json.loads(STATE_FILE.read_text(encoding="utf-8"))
         except (OSError, ValueError):
             last_sent = {}
-        check_all(cfg, last_sent)
+        errors = check_all(cfg, last_sent)
         STATE_FILE.write_text(json.dumps(last_sent), encoding="utf-8")
-        return
+        sys.exit(1 if errors else 0)  # κόκκινο στο GitHub Actions αν κάτι πήγε στραβά
 
     interval = int(cfg.get("INTERVAL_SECONDS", "60"))
     last_sent = {}
@@ -138,7 +138,11 @@ def main():
 
 
 def check_all(cfg, last_sent):
-    """Ένας έλεγχος όλων των στόχων. last_sent: 'service:country:hours' -> χρόνος ειδοποίησης ή None."""
+    """Ένας έλεγχος όλων των στόχων. last_sent: 'service:country:hours' -> χρόνος ειδοποίησης ή None.
+
+    Επιστρέφει τον αριθμό των σφαλμάτων.
+    """
+    errors = 0
     max_price = float(cfg["MAX_PRICE"]) if cfg.get("MAX_PRICE") else None
     renotify = int(cfg.get("RENOTIFY_MINUTES") or 0) * 60  # 0 = μία φορά ανά διαθεσιμότητα
     for service, country, hours in watch_list(cfg):
@@ -147,6 +151,7 @@ def check_all(cfg, last_sent):
             offer = get_offer(cfg, service, country, hours)
         except (urllib.error.URLError, RuntimeError, OSError) as e:
             print(f"[{time.strftime('%H:%M:%S')}] σφάλμα {key}: {e}")
+            errors += 1
             continue
         ok = offer is not None and offer[1] > 0 and (max_price is None or offer[0] <= max_price)
         print(f"[{time.strftime('%H:%M:%S')}] {key}: {offer} -> {'ΔΙΑΘΕΣΙΜΟ' if ok else 'όχι'}")
@@ -163,6 +168,8 @@ def check_all(cfg, last_sent):
                 last_sent[key] = time.time()
             except (urllib.error.URLError, OSError) as e:
                 print(f"σφάλμα Telegram: {e}")
+                errors += 1
+    return errors
 
 
 if __name__ == "__main__":
