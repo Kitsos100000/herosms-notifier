@@ -37,6 +37,7 @@ jobs:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
           WATCH: "ot:129:168"   # Any other, Greece, 7 days
+          LISTEN_SECONDS: "120" # κάθε εκτέλεση ακούει το Telegram 2 λεπτά (π.χ. «Έλεγχος τώρα»)
           DEMO: ${{ inputs.demo }}
         run: |
           # Με χειροκίνητο "Run workflow" στέλνει δοκιμαστικό μήνυμα (ή demo με κουμπιά).

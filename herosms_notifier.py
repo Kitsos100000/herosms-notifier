@@ -25,7 +25,7 @@ HERO_URL = "https://hero-sms.com/stubs/handler_api.php"
 ENV_FILE = Path(__file__).with_name(".env")
 STATE_FILE = Path(__file__).with_name("state.json")
 CONFIG_KEYS = ("HERO_API_KEY", "TELEGRAM_BOT_TOKEN", "TELEGRAM_CHAT_ID", "WATCH", "MAX_PRICE",
-               "INTERVAL_SECONDS", "RENOTIFY_MINUTES", "MAX_BUY", "BUY_WINDOW_MINUTES")
+               "INTERVAL_SECONDS", "RENOTIFY_MINUTES", "MAX_BUY", "BUY_WINDOW_MINUTES", "LISTEN_SECONDS")
 CONFIRM_TTL = 5 * 60          # το κουμπί «Επιβεβαίωση» λήγει μετά από 5 λεπτά
 SESSION_MAX = 25 * 60         # μέγιστη διάρκεια αναμονής για κουμπιά σε μία εκτέλεση --once
 DEMO_OFFER = (0.13, 300)      # τιμή / ποσότητα για τη λειτουργία --demo
@@ -356,8 +356,9 @@ def handle(cfg, state, upd):
 
 def poll(cfg, state, wait):
     """Ένας κύκλος getUpdates (long polling έως `wait` δευτ.). Επιστρέφει πόσα updates επεξεργάστηκε."""
+    wait = max(0, math.ceil(wait))  # προς τα πάνω: αλλιώς το 0.9 γίνεται 0 και οι κλήσεις γίνονται συνεχόμενες
     updates = telegram(cfg, "getUpdates", http_timeout=wait + 15, offset=state["offset"],
-                       timeout=int(wait))["result"]
+                       timeout=wait)["result"]
     for upd in updates:
         # Πρώτα «καταναλώνεται» το update (και στο Telegram), μετά εκτελείται: έτσι μια αγορά
         # δεν μπορεί να γίνει δύο φορές, ακόμα κι αν το πρόγραμμα κοπεί στη μέση.
@@ -448,10 +449,11 @@ def main():
         return
 
     if "--once" in sys.argv:
-        # Ένας έλεγχος (GitHub Actions). Αν στάλθηκε ειδοποίηση ή πατήθηκε κουμπί, περιμένει για αγορές.
+        # Ένας έλεγχος (GitHub Actions). Μετά ακούει το Telegram για λίγο (LISTEN_SECONDS),
+        # ή για όλο το παράθυρο αγοράς αν στάλθηκε ειδοποίηση. Κάθε πάτημα παρατείνει την αναμονή.
         errors, alerted = check_all(cfg, state)
         save_state(state)
-        session(cfg, state, window if alerted else 0)
+        session(cfg, state, window if alerted else int(cfg.get("LISTEN_SECONDS") or 0))
         save_state(state)
         sys.exit(1 if errors else 0)  # κόκκινο στο GitHub Actions αν κάτι πήγε στραβά
 
