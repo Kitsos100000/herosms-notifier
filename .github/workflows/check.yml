@@ -1,0 +1,52 @@
+name: HeroSMS check
+
+on:
+  schedule:
+    - cron: "*/5 * * * *"   # κάθε 5 λεπτά (το GitHub μπορεί να καθυστερήσει λίγο)
+  workflow_dispatch:         # χειροκίνητη εκτέλεση από την καρτέλα Actions
+
+permissions:
+  contents: write            # μόνο για το keepalive commit παρακάτω
+
+concurrency:
+  group: herosms-check
+  cancel-in-progress: false
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    steps:
+      - uses: actions/checkout@v4
+
+      # Η κατάσταση (αν έχει ήδη σταλεί ειδοποίηση) μεταφέρεται από εκτέλεση σε εκτέλεση μέσω cache.
+      - uses: actions/cache/restore@v4
+        with:
+          path: state.json
+          key: state-${{ github.run_id }}
+          restore-keys: state-
+
+      - name: Check availability
+        env:
+          HERO_API_KEY: ${{ secrets.HERO_API_KEY }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          WATCH: "ot:129:168"   # Any other, Greece, 7 days
+        run: python herosms_notifier.py --once
+
+      - uses: actions/cache/save@v4
+        if: always()
+        with:
+          path: state.json
+          key: state-${{ github.run_id }}
+
+      # Το GitHub απενεργοποιεί τα προγραμματισμένα workflows μετά από 60 μέρες χωρίς commit.
+      - name: Keepalive
+        run: |
+          last=$(git log -1 --format=%ct)
+          if [ $(( $(date +%s) - last )) -gt $(( 45 * 86400 )) ]; then
+            git config user.name "github-actions[bot]"
+            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+            git commit --allow-empty -m "keepalive"
+            git push
+          fi
