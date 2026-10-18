@@ -29,6 +29,8 @@ CONFIG_KEYS = ("HERO_API_KEY", "TELEGRAM_BOT_TOKEN", "TELEGRAM_CHAT_ID", "WATCH"
 CONFIRM_TTL = 5 * 60          # το κουμπί «Επιβεβαίωση» λήγει μετά από 5 λεπτά
 SESSION_MAX = 25 * 60         # μέγιστη διάρκεια αναμονής για κουμπιά σε μία εκτέλεση --once
 DEMO_OFFER = (0.13, 300)      # τιμή / ποσότητα για τη λειτουργία --demo
+CHECK_TEXT = "🔍 Έλεγχος τώρα"
+MENU = {"keyboard": [[{"text": CHECK_TEXT}]], "resize_keyboard": True, "is_persistent": True}
 
 
 class HeroError(RuntimeError):
@@ -183,10 +185,10 @@ def buy_buttons(key, qty, demo=False):
             [{"text": "✏️ Άλλος αριθμός…", "callback_data": f"a|{key}{d}"}]]
 
 
-def alert(cfg, key, offer, demo=False):
+def alert(cfg, key, offer, demo=False, title="🔔 Διαθέσιμο στο HeroSMS!"):
     price, qty = offer
     head = "🧪 DEMO – εικονική ειδοποίηση\n" if demo else ""
-    text = (f"{head}🔔 Διαθέσιμο στο HeroSMS!\n{label(key)}\n"
+    text = (f"{head}{title}\n{label(key)}\n"
             f"Ποσότητα: {qty} αριθμοί\nΤιμή: ${price}\nhttps://hero-sms.com")
     buttons = buy_buttons(key, qty, demo) if parse_key(key)[2] else None  # αγορά μόνο για ενοικιάσεις
     send(cfg, text, buttons)
@@ -278,6 +280,31 @@ def execute(cfg, message, key, n, demo):
     for i in range(0, len(lines), 50):  # το Telegram δέχεται έως 4096 χαρακτήρες ανά μήνυμα
         send(cfg, "📱 Αριθμοί:\n" + "\n".join(lines[i:i + 50]))
     print(f"αγορά {key}: {len(bought)}/{n} {'(demo)' if demo else ''} {stop or ''}")
+    # Ρωτάει αμέσως για τους υπόλοιπους.
+    try:
+        rest = (DEMO_OFFER[0], DEMO_OFFER[1] - len(bought)) if demo else get_offer(cfg, service, country, hours)
+    except (urllib.error.URLError, RuntimeError, OSError):
+        return
+    if rest and rest[1] > 0:
+        alert(cfg, key, rest, demo, title=f"📦 Απομένουν {rest[1]} διαθέσιμοι – θέλεις κι άλλους;")
+    else:
+        send(cfg, f"Δεν απέμειναν άλλοι διαθέσιμοι.\n{label(key)}")
+
+
+def manual_check(cfg, state):
+    """Κουμπί «Έλεγχος τώρα»: αν υπάρχουν αριθμοί ρωτάει με κουμπιά αγοράς, αλλιώς το λέει."""
+    for service, country, hours in watch_list(cfg):
+        key = f"{service}:{country}:{hours}"
+        try:
+            offer = get_offer(cfg, service, country, hours)
+        except (urllib.error.URLError, RuntimeError, OSError) as e:
+            send(cfg, f"⚠️ Σφάλμα στον έλεγχο: {e}\n{label(key)}")
+            continue
+        if available(cfg, offer):
+            alert(cfg, key, offer, title="🔍 Υπάρχουν διαθέσιμοι!")
+            state["sent"][key] = time.time()  # να μην ξαναστείλει ο αυτόματος έλεγχος την ίδια ειδοποίηση
+        else:
+            send(cfg, f"❌ Δεν υπάρχουν διαθέσιμοι τώρα.\n{label(key)}")
 
 
 def handle(cfg, state, upd):
@@ -312,6 +339,13 @@ def handle(cfg, state, upd):
     if not msg or str(msg.get("chat", {}).get("id")) != me:
         return
     text = (msg.get("text") or "").strip()
+    if text in (CHECK_TEXT, "/check"):
+        state["ask"] = None
+        manual_check(cfg, state)
+        return
+    if text == "/start":
+        send(cfg, f"Πάτα «{CHECK_TEXT}» όποτε θες να ελέγξεις τη διαθεσιμότητα.", reply_markup=MENU)
+        return
     ask = state.get("ask")
     if ask and text.isdigit() and int(text) > 0 and time.time() - ask["at"] < 30 * 60:
         state["ask"] = None
@@ -356,11 +390,15 @@ def session(cfg, state, window):
 
 # ---------------------------------------------------------------- έλεγχος διαθεσιμότητας
 
+def available(cfg, offer):
+    max_price = float(cfg["MAX_PRICE"]) if cfg.get("MAX_PRICE") else None
+    return offer is not None and offer[1] > 0 and (max_price is None or offer[0] <= max_price)
+
+
 def check_all(cfg, state):
     """Ένας έλεγχος όλων των στόχων. Επιστρέφει (σφάλματα, αν στάλθηκε νέα ειδοποίηση)."""
     sent = state["sent"]
     errors, alerted = 0, False
-    max_price = float(cfg["MAX_PRICE"]) if cfg.get("MAX_PRICE") else None
     renotify = int(cfg.get("RENOTIFY_MINUTES") or 0) * 60  # 0 = μία φορά ανά διαθεσιμότητα
     for service, country, hours in watch_list(cfg):
         key = f"{service}:{country}:{hours}"
@@ -370,7 +408,7 @@ def check_all(cfg, state):
             print(f"[{time.strftime('%H:%M:%S')}] σφάλμα {key}: {e}")
             errors += 1
             continue
-        ok = offer is not None and offer[1] > 0 and (max_price is None or offer[0] <= max_price)
+        ok = available(cfg, offer)
         print(f"[{time.strftime('%H:%M:%S')}] {key}: {offer} -> {'ΔΙΑΘΕΣΙΜΟ' if ok else 'όχι'}")
         if not ok:
             sent[key] = None
@@ -397,7 +435,7 @@ def main():
         print("Chat ID:", ", ".join(map(str, ids)) or "δεν βρέθηκε - στείλε πρώτα ένα μήνυμα στο bot σου")
         return
     if "--test" in sys.argv:
-        send(cfg, "✅ Το HeroSMS notifier λειτουργεί.")
+        send(cfg, f"✅ Το HeroSMS notifier λειτουργεί.\nΠάτα «{CHECK_TEXT}» όποτε θες έλεγχο.", reply_markup=MENU)
         print("Στάλθηκε.")
         return
 
