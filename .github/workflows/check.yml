@@ -4,6 +4,11 @@ on:
   schedule:
     - cron: "*/5 * * * *"   # κάθε 5 λεπτά (το GitHub μπορεί να καθυστερήσει λίγο)
   workflow_dispatch:         # χειροκίνητη εκτέλεση από την καρτέλα Actions
+    inputs:
+      demo:
+        description: "Demo: ψεύτικη ειδοποίηση με κουμπιά αγοράς (εικονικές αγορές, κανένα κόστος)"
+        type: boolean
+        default: false
 
 permissions:
   contents: write            # μόνο για το keepalive commit παρακάτω
@@ -15,11 +20,11 @@ concurrency:
 jobs:
   check:
     runs-on: ubuntu-latest
-    timeout-minutes: 3
+    timeout-minutes: 30      # όταν βγει διαθέσιμο, περιμένει ~10' για τα κουμπιά αγοράς
     steps:
       - uses: actions/checkout@v4
 
-      # Η κατάσταση (αν έχει ήδη σταλεί ειδοποίηση) μεταφέρεται από εκτέλεση σε εκτέλεση μέσω cache.
+      # Η κατάσταση (αν έχει ήδη σταλεί ειδοποίηση, ποια κουμπιά έχουν πατηθεί) μεταφέρεται από εκτέλεση σε εκτέλεση μέσω cache.
       - uses: actions/cache/restore@v4
         with:
           path: state.json
@@ -32,8 +37,10 @@ jobs:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
           WATCH: "ot:129:168"   # Any other, Greece, 7 days
+          DEMO: ${{ inputs.demo }}
         run: |
-          # Με χειροκίνητο "Run workflow" στέλνει και δοκιμαστικό μήνυμα στο Telegram.
+          # Με χειροκίνητο "Run workflow" στέλνει δοκιμαστικό μήνυμα (ή demo με κουμπιά).
+          if [ "$DEMO" = "true" ]; then python herosms_notifier.py --demo; exit; fi
           if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then python herosms_notifier.py --test; fi
           python herosms_notifier.py --once
 
