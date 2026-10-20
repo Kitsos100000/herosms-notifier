@@ -383,7 +383,13 @@ def session(cfg, state, window):
     deadline = start + window
     while True:
         remaining = min(deadline, start + SESSION_MAX) - time.time()
-        if poll(cfg, state, max(0, min(25, remaining))):
+        try:
+            got = poll(cfg, state, max(0, min(25, remaining)))
+        except (urllib.error.URLError, OSError) as e:  # στιγμιαίο σφάλμα δικτύου: ξαναδοκιμάζει
+            print(f"σφάλμα σύνδεσης Telegram: {e}")
+            time.sleep(3)
+            got = 0
+        if got:
             deadline = max(deadline, time.time() + int(cfg.get("BUY_WINDOW_MINUTES") or 10) * 60)
         elif remaining <= 0:
             return

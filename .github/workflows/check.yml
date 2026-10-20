@@ -1,8 +1,8 @@
 name: HeroSMS check
 
+# Το bot τρέχει πλέον στο Cloudflare (φάκελος cloudflare/). Ο αυτόματος έλεγχος εδώ είναι κλειστός,
+# γιατί το webhook του Telegram δεν επιτρέπει να διαβάζει και το GitHub τα μηνύματα.
 on:
-  schedule:
-    - cron: "*/5 * * * *"   # κάθε 5 λεπτά (το GitHub μπορεί να καθυστερήσει λίγο)
   workflow_dispatch:         # χειροκίνητη εκτέλεση από την καρτέλα Actions
     inputs:
       demo:
