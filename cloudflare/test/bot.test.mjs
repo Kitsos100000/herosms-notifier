@@ -18,11 +18,20 @@ function world({ offer = [0.13, 300], balance = 16.09, failAfter = null, heroDow
   };
   const json = (obj, status = 200) => ({ ok: status < 400, status, text: async () => JSON.stringify(obj), json: async () => obj });
   const text = (s, status = 200) => ({ ok: status < 400, status, text: async () => s });
-  w.acts = []; w.otps = {}; w.v1calls = 0;
+  w.acts = []; w.otps = {}; w.v1calls = 0; w.finished = []; w.finishErr = {};
   w.fetch = async (url, init) => {
     if (url.startsWith("https://hero-sms.com/api/v1")) {
       w.v1calls++;
       assert.match(init.headers.Authorization, /^ApiKey /);
+      assert.notEqual(init.method, "DELETE", "ποτέ ακύρωση (Cancel)");
+      const fin = new URL(url).pathname.match(/activations\/([^/]+)\/finish$/);
+      if (fin) {
+        assert.equal(init.method, "POST");
+        const err = w.finishErr[fin[1]] || w.finishErr["*"];
+        if (err) return json({ title: err.title, details: "x" }, err.status);
+        w.finished.push(fin[1]);
+        return text("", 204);
+      }
       const u = new URL(url);
       const size = Number(u.searchParams.get("size")), page = Number(u.searchParams.get("page"));
       if (size > 25) return json({ title: "Unprocessable entity!", details: "size" }, 422);
@@ -365,4 +374,165 @@ test("Καθαρή λίστα: μόνο 69xxxxxxxx, νεότερος → παλ�
   await w.type("/clean");
   await w.runAlarms();
   assert.equal(w.last().text.split("\n").at(-1), "6900000599");
+});
+
+// ------------------------------------------------------------ /complete
+
+import { parsePositions } from "../src/bot.js";
+
+/** /list -> snapshot. Επιστρέφει τον κωδικό του /complete. */
+async function listThenComplete(w, spec) {
+  await w.type("/clean");
+  await w.runAlarms();
+  await w.type(`/complete ${spec}`);
+  const p = await w.storage.get("finPending");
+  return p?.code;
+}
+const idAt = (w, pos) => String(w.acts[pos - 1].id); // θέση στη λίστα (1 = νεότερος)
+
+test("parsePositions: αυστηρή μορφή", () => {
+  assert.deepEqual(parsePositions("350-400", 500).positions.length, 51);
+  assert.deepEqual(parsePositions("1-3,7, 10-12", 20).positions, [1, 2, 3, 7, 10, 11, 12]);
+  assert.deepEqual(parsePositions("5,5,4-6", 9).positions, [4, 5, 6]);
+  assert.deepEqual(parsePositions("350–400", 500).positions.length, 51, "δέχεται και en dash");
+  assert.deepEqual(parsePositions(" 350 - 400 , 410 ", 500).positions.length, 52, "κενά γύρω από - και ,");
+  for (const bad of ["", "abc", "350-", "-5", "1-2-3", "5;6", "1.5", "350 400", "1 2", "1-3 7", "0", "0-3"]) {
+    assert.ok(parsePositions(bad, 500).error, `απορρίπτεται: «${bad}»`);
+  }
+  assert.match(parsePositions("400-350", 500).error, /μεγαλύτερη/);
+  assert.match(parsePositions("490-501", 500).error, /501 δεν υπάρχει/);
+});
+
+test("/complete 350-400: σύνοψη, κωδικός, ολοκληρώνει ακριβώς τις 51 θέσεις", async () => {
+  const w = world();
+  makeActs(w, 500);
+  const code = await listThenComplete(w, "350-400");
+  assert.ok(code >= 1000 && code <= 9999);
+  assert.equal(w.finished.length, 0, "τίποτα πριν την επιβεβαίωση");
+  const summary = w.sent.filter(m => /COMPLETE ACTIVATION/.test(m.text)).map(m => m.text).join("\n");
+  assert.match(summary, /ΜΗ ΑΝΑΣΤΡΕΨΙΜΟ/);
+  assert.match(summary, /Σύνολο: 51 αριθμοί/);
+  assert.match(summary, /Πρώτος: #350 6900000349/);
+  assert.match(summary, /Τελευταίος: #400 6900000399/);
+  const all = w.sent.map(m => m.text).join("\n");
+  assert.equal([...all.matchAll(/^#\d+ 69/gm)].length, 51, "όλοι οι 51 στη λίστα");
+  assert.match(w.last().text, new RegExp(`/confirm ${code}`));
+  assert.deepEqual(w.buttons(w.last()), ["xf"]);
+  await w.type(`/confirm ${code}`);
+  await w.runAlarms();
+  const expected = Array.from({ length: 51 }, (_, i) => idAt(w, 350 + i));
+  assert.deepEqual(w.finished, expected, "ακριβώς οι θέσεις 350..400, μία φορά η καθεμία");
+  assert.match(w.edits.at(-1).text, /✅ Complete activation: 51\/51/);
+  assert.equal(await w.storage.get("fin"), undefined);
+  assert.equal(await w.storage.get("snapshot"), undefined, "χρειάζεται νέο /list");
+  await w.type(`/confirm ${code}`);
+  assert.match(w.last().text, /Δεν υπάρχει εκκρεμές/);
+  await w.type("/complete 1-2");
+  assert.match(w.last().text, /Γράψε πρώτα \/list/);
+  await w.runAlarms();
+  assert.equal(w.finished.length, 51, "τίποτα παραπάνω");
+});
+
+test("/complete: νέα αγορά μετά το /list δεν μετακινεί τις θέσεις", async () => {
+  const w = world();
+  makeActs(w, 20);
+  await w.type("/list"); await w.runAlarms();
+  const want = [idAt(w, 3), idAt(w, 4)];
+  w.acts.unshift({ ...w.acts[0], id: 99999, phone: 306999999999, createdAt: "2026-10-21T18:59:00.000Z" }); // νέος, πρώτος πλέον
+  await w.type("/complete 3-4");
+  const { code } = await w.storage.get("finPending");
+  await w.type(`/confirm ${code}`);
+  await w.runAlarms();
+  assert.deepEqual(w.finished, want);
+});
+
+test("/complete: λάθος/ληγμένος κωδικός, ακύρωση, παλιά λίστα, θέσεις εκτός, ξένο chat", async () => {
+  let w = world(); makeActs(w, 10);
+  let code = await listThenComplete(w, "1-3");
+  await w.type(`/confirm ${code === 9999 ? 1000 : code + 1}`);
+  assert.match(w.last().text, /Λάθος κωδικός/);
+  await w.type(`/confirm ${code}`);
+  assert.match(w.last().text, /Δεν υπάρχει εκκρεμές/, "μετά από λάθος κωδικό ακυρώνεται");
+  await w.runAlarms();
+  assert.equal(w.finished.length, 0);
+
+  w = world(); makeActs(w, 10);
+  code = await listThenComplete(w, "1-3");
+  w.clock += 6 * 60_000;
+  await w.type(`/confirm ${code}`);
+  assert.match(w.last().text, /έληξε/);
+  await w.runAlarms();
+  assert.equal(w.finished.length, 0);
+
+  w = world(); makeActs(w, 10);
+  code = await listThenComplete(w, "1-3");
+  await w.press("xf");
+  assert.match(w.edits.at(-1).text, /Ακυρώθηκε/);
+  await w.type(`/confirm ${code}`);
+  await w.runAlarms();
+  assert.equal(w.finished.length, 0);
+
+  w = world(); makeActs(w, 10);
+  await w.type("/complete 1-3");
+  assert.match(w.last().text, /Γράψε πρώτα \/list/, "χωρίς λίστα");
+  await w.type("/list"); await w.runAlarms();
+  w.clock += 61 * 60_000;
+  await w.type("/complete 1-3");
+  assert.match(w.last().text, /Γράψε πρώτα \/list/, "παλιά λίστα");
+
+  w = world(); makeActs(w, 10);
+  await w.type("/list"); await w.runAlarms();
+  await w.type("/complete 5-11");
+  assert.match(w.last().text, /11 δεν υπάρχει/);
+  await w.type("/complete 350 400");
+  assert.match(w.last().text, /Μη έγκυρη μορφή/);
+  await w.type("/complete");
+  assert.match(w.last().text, /Γράψε τις θέσεις/);
+  assert.equal(await w.storage.get("finPending"), undefined);
+
+  w = world(); makeActs(w, 10);
+  code = await listThenComplete(w, "1-3");
+  await w.type(`/confirm ${code}`, 777); // ξένο chat
+  await w.runAlarms();
+  assert.equal(w.finished.length, 0);
+});
+
+test("/complete: σφάλμα ενός αριθμού -> συνεχίζει, γενικό σφάλμα -> σταματά", async () => {
+  let w = world(); makeActs(w, 10);
+  w.finishErr[idAt(w, 2)] = { status: 409, title: "NEW_OTP_RECEIVED" };
+  let code = await listThenComplete(w, "1-4");
+  await w.type(`/confirm ${code}`);
+  await w.runAlarms();
+  assert.deepEqual(w.finished, [idAt(w, 1), idAt(w, 3), idAt(w, 4)]);
+  assert.match(w.edits.at(-1).text, /3\/4 ολοκληρώθηκαν/);
+  assert.match(w.last().text, /❌ #2 6900000001 – NEW_OTP_RECEIVED/);
+
+  w = world(); makeActs(w, 10);
+  code = await listThenComplete(w, "1-5");
+  await w.type(`/confirm ${code}`);
+  const realFinished = w.finished;
+  w.bot.fetch = async (url, init) => {
+    if (url.includes("/finish") && realFinished.length === 2) return { ok: false, status: 503, text: async () => "<html>down</html>" };
+    return w.fetch(url, init);
+  };
+  await w.runAlarms();
+  assert.equal(w.finished.length, 2);
+  assert.match(w.edits.at(-1).text, /2\/5 ολοκληρώθηκαν/);
+  assert.match(w.edits.at(-1).text, /Σταμάτησε: HTTP_503/);
+  assert.match(w.last().text, /⏸ #3 .* δεν έγινε/);
+});
+
+test("/complete: πολλοί αριθμοί σε βήματα, διπλό update δεν ξανατρέχει", async () => {
+  const w = world(); makeActs(w, 120);
+  await w.type("/list"); await w.runAlarms();
+  await w.type("/complete 1-100");
+  const { code } = await w.storage.get("finPending");
+  const upd = { update_id: 777, message: { chat: { id: 555 }, text: `/confirm ${code}` } };
+  await w.bot.handleUpdate(upd);
+  await w.bot.handleUpdate(upd);
+  await w.bot.alarm(); w.alarms.shift();
+  assert.equal(w.finished.length, 35, "όριο ανά βήμα");
+  await w.runAlarms();
+  assert.equal(w.finished.length, 100);
+  assert.equal(new Set(w.finished).size, 100, "καμία διπλή ολοκλήρωση");
 });

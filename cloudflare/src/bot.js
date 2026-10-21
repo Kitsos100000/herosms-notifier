@@ -6,6 +6,8 @@ const HERO_V1 = "https://hero-sms.com/api/v1";
 const PAGE_SIZE = 25;         // μέγιστο που δέχεται το /activations
 const STEP_BUDGET = 35;       // κλήσεις HeroSMS ανά εκτέλεση για /list και /scan (όριο δωρεάν πλάνου: 50)
 const DEFAULT_SENDER = "PREDICT2WIN";
+const SNAPSHOT_TTL = 60 * 60; // δευτ.: πόσο ισχύει η λίστα του /list ή /clean για το /complete
+const FIN_CODE_TTL = 5 * 60;  // δευτ.: πόσο ισχύει ο κωδικός /confirm
 export const CHECK_TEXT = "🔍 Έλεγχος τώρα";
 export const CLEAN_TEXT = "📋 Καθαρή λίστα";
 // Χωρίς κουμπιά κάτω από το πεδίο γραφής: όλα γίνονται από το Menu του bot (setMyCommands).
@@ -53,20 +55,28 @@ export class Bot {
     return data;
   }
 
-  /** Νέο API του HeroSMS (/api/v1), για τη λίστα αριθμών και τα SMS τους. */
-  async heroV1(path, params = {}) {
+  /** Νέο API του HeroSMS (/api/v1): λίστα αριθμών, SMS, ολοκλήρωση. Τα σφάλματα έχουν .status (HTTP). */
+  async heroV1(path, params = {}, method = "GET") {
     const q = new URLSearchParams(params);
-    const r = await this.fetch(`${HERO_V1}${path}?${q}`, {
+    const r = await this.fetch(`${HERO_V1}${path}${String(q) ? `?${q}` : ""}`, {
+      method,
       headers: { Authorization: `ApiKey ${this.env.HERO_API_KEY}`, "User-Agent": "herosms-notifier/1.0" },
     });
     const body = (await r.text()).trim();
+    if (r.ok && !body) return null; // π.χ. 204 No Content
     let data;
     try {
       data = JSON.parse(body);
     } catch {
-      throw new HeroError(`HTTP_${r.status}`, body.startsWith("<") ? "(το HeroSMS απάντησε με σελίδα HTML)" : body.slice(0, 100));
+      const e = new HeroError(`HTTP_${r.status}`, body.startsWith("<") ? "(το HeroSMS απάντησε με σελίδα HTML)" : body.slice(0, 100));
+      e.status = r.ok ? 502 : r.status; // απάντηση που δεν καταλαβαίνουμε: γενικό σφάλμα
+      throw e;
     }
-    if (!r.ok) throw new HeroError(data?.title || `HTTP_${r.status}`, data?.details || "");
+    if (!r.ok) {
+      const e = new HeroError(data?.title || `HTTP_${r.status}`, data?.details || "");
+      e.status = r.status;
+      throw e;
+    }
     return data;
   }
 
@@ -268,6 +278,10 @@ export class Bot {
         return this.startPurchase(msg, key, Number(arg), demo);
       }
       if (kind === "x") return this.edit(msg, "❌ Ακυρώθηκε.");
+      if (kind === "xf") {
+        await this.storage.delete("finPending");
+        return this.edit(msg, "❌ Ακυρώθηκε το Complete activation. Δεν έγινε καμία αλλαγή.");
+      }
       return;
     }
     const msg = upd.message;
@@ -282,11 +296,14 @@ export class Bot {
         "/check – έλεγχος διαθεσιμότητας τώρα\n" +
         "/list – ενεργοί αριθμοί (νεότερος → παλαιότερος)\n" +
         "/clean – μόνο οι αριθμοί (69xxxxxxxx), ένας ανά γραμμή\n" +
+        "/complete 350-400 – Complete activation στις θέσεις της λίστας (με επιβεβαίωση)\n" +
         `/scan – ποιοι αριθμοί έλαβαν SMS από ${DEFAULT_SENDER} (ή /scan ΑΠΟΣΤΟΛΕΑΣ)\n` +
         "/balance – υπόλοιπο\n/demo – δοκιμή με εικονικές αγορές", null, { reply_markup: NO_KEYBOARD });
     }
     const [cmd, ...args] = text.split(/\s+/);
     const command = cmd.toLowerCase().replace(/@.*$/, ""); // π.χ. /list@Kitsos_HeroSMS_bot
+    if (command === "/complete") return this.prepareFinish(args.join(" "));
+    if (command === "/confirm") return this.confirmFinish(args.join(" "));
     if (command === "/list") return this.startReport("list");
     if (command === "/clean" || text === CLEAN_TEXT) return this.startReport("clean");
     if (command === "/scan") return this.startReport("scan", args.join(" ") || this.env.SCAN_SENDER || DEFAULT_SENDER);
@@ -369,8 +386,10 @@ export class Bot {
 
   /** Κάθε alarm κάνει ένα βήμα: πρώτα τις αγορές, αλλιώς τη λίστα / σάρωση. */
   async alarm() {
-    const more = (await this.storage.get("job")) ? await this.purchaseStep() : await this.reportStep();
-    if (more || (await this.storage.get("job")) || (await this.storage.get("report"))) {
+    const more = (await this.storage.get("job")) ? await this.purchaseStep()
+      : (await this.storage.get("fin")) ? await this.finishStep()
+      : await this.reportStep();
+    if (more || (await this.storage.get("job")) || (await this.storage.get("fin")) || (await this.storage.get("report"))) {
       await this.storage.setAlarm(this.now()); // συνέχεια στο επόμενο βήμα
     }
   }
@@ -477,8 +496,106 @@ export class Bot {
   }
 
   /** Μόνο οι αριθμοί σε μορφή 69xxxxxxxx, ένας ανά γραμμή, χωρίς τίποτα άλλο. */
+  // ------------------------------------------------------------ /complete (Complete activation)
+  // Μη αναστρέψιμο: ο αριθμός σταματά να λαμβάνει SMS και τα χρήματα δεν επιστρέφονται. Γι' αυτό:
+  // θέσεις μόνο από τη λίστα που είδες, σύνοψη, γραπτός κωδικός μίας χρήσης, εκτέλεση βήμα-βήμα.
+
+  async prepareFinish(spec) {
+    if (!spec.trim()) {
+      return this.send("Γράψε τις θέσεις από το /list ή το /clean, π.χ.\n/complete 350-400\n/complete 5\n/complete 1-3,7,10-12");
+    }
+    if ((await this.storage.get("job")) || (await this.storage.get("fin"))) {
+      return this.send("⏳ Υπάρχει ήδη αγορά ή Complete activation σε εξέλιξη. Περίμενε να τελειώσει.");
+    }
+    const snap = await this.storage.get("snapshot");
+    if (!snap || this.now() - snap.at > SNAPSHOT_TTL * 1000) {
+      return this.send("Γράψε πρώτα /list ή /clean, για να δεις τη λίστα στην οποία αναφέρονται οι θέσεις.\n" +
+        "(Η λίστα ισχύει 60 λεπτά και μόνο μέχρι το επόμενο Complete activation.)");
+    }
+    const parsed = parsePositions(spec, snap.items.length);
+    if (parsed.error) return this.send(`❌ ${parsed.error}\nΔεν έγινε καμία αλλαγή.`);
+    const items = parsed.positions.map(pos => ({ pos, ...snap.items[pos - 1] }));
+    const code = 1000 + (crypto.getRandomValues(new Uint32Array(1))[0] % 9000);
+    await this.storage.put("finPending", { items, code, at: this.now() });
+    const first = items[0], last = items[items.length - 1];
+    await this.sendLines(
+      "⚠️ COMPLETE ACTIVATION – ΜΗ ΑΝΑΣΤΡΕΨΙΜΟ\n" +
+      "Οι αριθμοί θα σταματήσουν να λαμβάνουν SMS και τα χρήματα ΔΕΝ επιστρέφονται.\n\n" +
+      `Θέσεις: ${parsed.normalized} από τη λίστα της ${fmtDate(new Date(snap.at).toISOString())} (${snap.items.length} αριθμοί)\n` +
+      `Σύνολο: ${items.length} αριθμοί\n` +
+      `Πρώτος: #${first.pos} ${localPhone(first.phone)}\nΤελευταίος: #${last.pos} ${localPhone(last.phone)}\n\nΌλοι:`,
+      items.map(it => `#${it.pos} ${localPhone(it.phone)}`));
+    await this.send(`Για επιβεβαίωση γράψε ακριβώς:\n/confirm ${code}\n\n` +
+      `(ισχύει ${FIN_CODE_TTL / 60} λεπτά και μία φορά· λάθος κωδικός = ακύρωση)`,
+      [[{ text: "❌ Ακύρωση", callback_data: "xf" }]]);
+  }
+
+  async confirmFinish(codeArg) {
+    const p = await this.storage.get("finPending");
+    if (!p) return this.send("Δεν υπάρχει εκκρεμές Complete activation. Ξεκίνα με /complete.");
+    await this.storage.delete("finPending"); // μίας χρήσης, ό,τι κι αν γίνει παρακάτω
+    if (this.now() - p.at > FIN_CODE_TTL * 1000) return this.send("⌛ Ο κωδικός έληξε. Δεν έγινε καμία αλλαγή.");
+    if (codeArg.trim() !== String(p.code)) return this.send("❌ Λάθος κωδικός. Ακυρώθηκε, δεν έγινε καμία αλλαγή.");
+    if ((await this.storage.get("job")) || (await this.storage.get("fin"))) {
+      return this.send("⏳ Υπάρχει ήδη αγορά ή Complete activation σε εξέλιξη. Δεν έγινε καμία αλλαγή.");
+    }
+    await this.storage.delete("snapshot"); // μετά από αυτό οι θέσεις αλλάζουν: χρειάζεται νέο /list
+    const msg = await this.send(`⏳ Complete activation σε εξέλιξη… 0/${p.items.length}`);
+    await this.storage.put("fin", { items: p.items, idx: 0, done: [], failed: [], stop: null,
+      msg: { chat: { id: msg.chat.id }, message_id: msg.message_id } });
+    await this.storage.setAlarm(this.now());
+  }
+
+  /** Ένα βήμα ολοκληρώσεων. Επιστρέφει true αν μένουν κι άλλες. */
+  async finishStep() {
+    const fin = await this.storage.get("fin");
+    if (!fin) return false;
+    for (let calls = 0; fin.idx < fin.items.length && !fin.stop && calls < STEP_BUDGET; calls++) {
+      const it = fin.items[fin.idx];
+      try {
+        await this.heroV1(`/activations/${encodeURIComponent(it.id)}/finish`, {}, "POST");
+        fin.done.push(it);
+      } catch (e) {
+        // Γενικό σφάλμα (κλειδί, όριο, server, δίκτυο): σταματά όλο, χωρίς να προχωρήσει.
+        if (!e.status || e.status === 401 || e.status === 403 || e.status === 429 || e.status >= 500) {
+          fin.stop = e.message;
+          await this.storage.put("fin", fin);
+          break;
+        }
+        fin.failed.push({ ...it, reason: e.message }); // σφάλμα μόνο αυτού του αριθμού: συνεχίζει
+      }
+      fin.idx++;
+      await this.storage.put("fin", fin); // κάθε ολοκλήρωση αποθηκεύεται αμέσως
+    }
+    if (fin.idx < fin.items.length && !fin.stop) {
+      await this.edit(fin.msg, `⏳ Complete activation σε εξέλιξη… ${fin.idx}/${fin.items.length}`);
+      return true;
+    }
+    await this.storage.delete("fin");
+    const notDone = fin.items.slice(fin.idx);
+    let head = `${fin.done.length === fin.items.length ? "✅" : "⚠️"} Complete activation: ` +
+      `${fin.done.length}/${fin.items.length} ολοκληρώθηκαν`;
+    if (fin.failed.length) head += `\n❌ ${fin.failed.length} απέτυχαν (δεν άλλαξαν)`;
+    if (fin.stop) head += `\n⛔ Σταμάτησε: ${fin.stop}\n${notDone.length} δεν έγιναν (δεν άλλαξαν)`;
+    head += "\nΓια νέο /complete γράψε πρώτα ξανά /list (οι θέσεις άλλαξαν).";
+    await this.edit(fin.msg, head);
+    const lines = [
+      ...fin.failed.map(it => `❌ #${it.pos} ${localPhone(it.phone)} – ${it.reason}`),
+      ...notDone.map(it => `⏸ #${it.pos} ${localPhone(it.phone)} – δεν έγινε`),
+    ];
+    if (lines.length) await this.sendLines("Αριθμοί που ΔΕΝ ολοκληρώθηκαν:", lines);
+    console.log(`complete: ${fin.done.length}/${fin.items.length} ${fin.stop || ""}`);
+    return false;
+  }
+
+  /** Κρατά τη λίστα που είδες (ίδια σειρά με /list και /clean): σε αυτή αναφέρονται οι θέσεις του /complete. */
+  async saveSnapshot(active) {
+    await this.storage.put("snapshot", { at: this.now(), items: active.map(a => ({ id: a.id, phone: a.phone })) });
+  }
+
   async sendClean(rep) {
     const active = this.activeItems(rep);
+    await this.saveSnapshot(active);
     if (!active.length) return this.send("📋 Δεν υπάρχουν ενεργοί αριθμοί.");
     let msg = "";
     for (const line of active.map(a => localPhone(a.phone))) {
@@ -490,6 +607,7 @@ export class Bot {
 
   async sendList(rep) {
     const active = this.activeItems(rep);
+    await this.saveSnapshot(active);
     if (!active.length) return this.send("📋 Δεν υπάρχουν ενεργοί αριθμοί.");
     const lines = active.map((a, i) =>
       `${i + 1}. +${a.phone} · ${fmtDate(a.createdAt)} → ${fmtDate(a.expiredAt)}${a.otpCount ? ` · 📩 ${a.otpCount}` : ""}`);
@@ -562,6 +680,28 @@ export class Bot {
       await this.storage.put("sent", sent);
     }
   }
+}
+
+/**
+ * '350-400' / '5' / '1-3,7,10-12' -> θέσεις 1..n (ταξινομημένες, χωρίς διπλές) ή { error }.
+ * Αυστηρό: μόνο αριθμοί, παύλες και κόμματα. Οτιδήποτε άλλο απορρίπτεται.
+ */
+export function parsePositions(spec, n) {
+  // Κενά μόνο γύρω από - και , (π.χ. «350 - 400»). Κενό ανάμεσα σε αριθμούς («1 2») ΔΕΝ ενώνεται σε «12»: απορρίπτεται.
+  const s = String(spec || "").replace(/[–—−]/g, "-").trim().replace(/\s*([-,])\s*/g, "$1");
+  if (!/^\d+(-\d+)?(,\d+(-\d+)?)*$/.test(s)) {
+    return { error: `Μη έγκυρη μορφή «${spec}». Γράψε π.χ. 350-400 ή 5 ή 1-3,7` };
+  }
+  const set = new Set();
+  for (const part of s.split(",")) {
+    const [a, b = a] = part.split("-").map(Number);
+    if (a < 1) return { error: "Οι θέσεις αρχίζουν από το 1." };
+    if (a > b) return { error: `«${part}»: η αρχή είναι μεγαλύτερη από το τέλος.` };
+    if (b > n) return { error: `Η θέση ${b} δεν υπάρχει: η λίστα έχει ${n} αριθμούς.` };
+    for (let i = a; i <= b; i++) set.add(i);
+  }
+  const positions = [...set].sort((x, y) => x - y);
+  return { positions, normalized: s };
 }
 
 /** 306912345678 -> 6912345678 (χωρίς το +30 της Ελλάδας) */
