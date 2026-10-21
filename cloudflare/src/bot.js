@@ -2,6 +2,10 @@
 // Δεν εξαρτάται από το Cloudflare (παίρνει storage/env/fetch απ' έξω), ώστε να δοκιμάζεται σε Node.
 
 const HERO_URL = "https://hero-sms.com/stubs/handler_api.php";
+const HERO_V1 = "https://hero-sms.com/api/v1";
+const PAGE_SIZE = 25;         // μέγιστο που δέχεται το /activations
+const STEP_BUDGET = 35;       // κλήσεις HeroSMS ανά εκτέλεση για /list και /scan (όριο δωρεάν πλάνου: 50)
+const DEFAULT_SENDER = "PREDICT2WIN";
 export const CHECK_TEXT = "🔍 Έλεγχος τώρα";
 const MENU = { keyboard: [[{ text: CHECK_TEXT }]], resize_keyboard: true, is_persistent: true };
 const CONFIRM_TTL = 5 * 60;   // δευτ.: το κουμπί «Επιβεβαίωση» λήγει μετά από 5 λεπτά
@@ -43,6 +47,23 @@ export class Bot {
       throw new HeroError(data.title, data.details);
     }
     if (!r.ok) throw new HeroError(`HTTP_${r.status}`);
+    return data;
+  }
+
+  /** Νέο API του HeroSMS (/api/v1), για τη λίστα αριθμών και τα SMS τους. */
+  async heroV1(path, params = {}) {
+    const q = new URLSearchParams(params);
+    const r = await this.fetch(`${HERO_V1}${path}?${q}`, {
+      headers: { Authorization: `ApiKey ${this.env.HERO_API_KEY}`, "User-Agent": "herosms-notifier/1.0" },
+    });
+    const body = (await r.text()).trim();
+    let data;
+    try {
+      data = JSON.parse(body);
+    } catch {
+      throw new HeroError(`HTTP_${r.status}`, body.startsWith("<") ? "(το HeroSMS απάντησε με σελίδα HTML)" : body.slice(0, 100));
+    }
+    if (!r.ok) throw new HeroError(data?.title || `HTTP_${r.status}`, data?.details || "");
     return data;
   }
 
@@ -255,8 +276,14 @@ export class Bot {
     }
     if (text === "/start") {
       return this.send(`Πάτα «${CHECK_TEXT}» όποτε θες να ελέγξεις τη διαθεσιμότητα.\n` +
-        "Άλλες εντολές: /balance (υπόλοιπο), /demo (δοκιμή με εικονικές αγορές).", null, { reply_markup: MENU });
+        "Εντολές:\n/list – ενεργοί αριθμοί (νεότερος → παλαιότερος)\n" +
+        `/scan – ποιοι αριθμοί έλαβαν SMS από ${DEFAULT_SENDER} (ή /scan ΑΠΟΣΤΟΛΕΑΣ)\n` +
+        "/balance – υπόλοιπο\n/demo – δοκιμή με εικονικές αγορές", null, { reply_markup: MENU });
     }
+    const [cmd, ...args] = text.split(/\s+/);
+    const command = cmd.toLowerCase().replace(/@.*$/, ""); // π.χ. /list@Kitsos_HeroSMS_bot
+    if (command === "/list") return this.startReport("list");
+    if (command === "/scan") return this.startReport("scan", args.join(" ") || this.env.SCAN_SENDER || DEFAULT_SENDER);
     if (text === "/balance") return this.send(`💰 Υπόλοιπο HeroSMS: $${(await this.getBalance()).toFixed(2)}`);
     if (text === "/demo") {
       const key = this.watchList()[0];
@@ -334,9 +361,18 @@ export class Bot {
     await this.storage.setAlarm(this.now());
   }
 
+  /** Κάθε alarm κάνει ένα βήμα: πρώτα τις αγορές, αλλιώς τη λίστα / σάρωση. */
   async alarm() {
+    const more = (await this.storage.get("job")) ? await this.purchaseStep() : await this.reportStep();
+    if (more || (await this.storage.get("job")) || (await this.storage.get("report"))) {
+      await this.storage.setAlarm(this.now()); // συνέχεια στο επόμενο βήμα
+    }
+  }
+
+  /** Μια παρτίδα αγορών. Επιστρέφει true αν μένουν κι άλλες. */
+  async purchaseStep() {
     const job = await this.storage.get("job");
-    if (!job) return;
+    if (!job) return false;
     const { service, country, hours } = Bot.parseKey(job.key);
     for (let i = 0; i < BATCH && job.bought.length < job.n && !job.stop; i++) {
       try {
@@ -351,10 +387,120 @@ export class Bot {
     }
     if (job.bought.length < job.n && !job.stop) {
       await this.edit(job.msg, `⏳ Αγορά ${job.n} αριθμών σε εξέλιξη… ${job.bought.length}/${job.n}\n${await this.label(job.key)}`);
-      await this.storage.setAlarm(this.now()); // συνέχεια στην επόμενη παρτίδα
-      return;
+      return true;
     }
     await this.finish(job);
+    return false;
+  }
+
+  // ------------------------------------------------------------ /list και /scan
+
+  /** Ξεκινά λίστα ενεργών αριθμών (type "list") ή σάρωση SMS από αποστολέα (type "scan"). */
+  async startReport(type, sender = null) {
+    if (await this.storage.get("report")) return this.send("⏳ Υπάρχει ήδη λίστα/σάρωση σε εξέλιξη. Περίμενε λίγο.");
+    await this.storage.put("report", { type, sender, page: 1, total: null, listed: false, items: [], queue: null, matches: {} });
+    await this.send(type === "list" ? "⏳ Διαβάζω τους ενεργούς αριθμούς…" : `⏳ Σαρώνω τα SMS όλων των αριθμών για «${sender}»…`);
+    await this.storage.setAlarm(this.now());
+  }
+
+  /** Ένα βήμα (έως STEP_BUDGET κλήσεις). Επιστρέφει true αν μένει δουλειά. */
+  async reportStep() {
+    const rep = await this.storage.get("report");
+    if (!rep) return false;
+    let calls = 0;
+    try {
+      // 1. Όλες οι σελίδες των ενεργών αριθμών (έρχονται από τον νεότερο στον παλαιότερο).
+      while (!rep.listed && calls < STEP_BUDGET) {
+        const d = await this.heroV1("/activations", { size: PAGE_SIZE, page: rep.page });
+        calls++;
+        const data = d.data || [];
+        if (d.meta?.total != null) rep.total = d.meta.total;
+        const seen = new Set(rep.items.map(a => a.id));
+        for (const a of data) if (!seen.has(String(a.id))) rep.items.push(compact(a));
+        rep.page++;
+        if (data.length < PAGE_SIZE || d.meta?.hasMore === false && d.meta?.total == null ||
+            (rep.total != null && (rep.page - 1) * PAGE_SIZE >= rep.total)) rep.listed = true;
+        await this.storage.put("report", rep);
+      }
+      if (!rep.listed) return true;
+
+      if (rep.type === "scan") {
+        // 2. Όσοι έχουν ένα SMS: φαίνεται ήδη στη λίστα. Όσοι έχουν περισσότερα: ζητάμε όλα τους τα SMS.
+        if (!rep.queue) {
+          rep.queue = [];
+          for (const a of rep.items) {
+            if (a.otpCount > 1) rep.queue.push(a.id);
+            else if (a.last && sameSender(a.last.from, rep.sender)) addMatch(rep, a.id, a.last);
+          }
+        }
+        while (rep.queue.length && calls < STEP_BUDGET) {
+          const id = rep.queue[0];
+          for (let page = 1; calls < STEP_BUDGET; page++) {
+            const d = await this.heroV1(`/activations/${id}/otp`, { size: PAGE_SIZE, page });
+            calls++;
+            for (const m of d.data || []) {
+              if (sameSender(m.phoneFrom, rep.sender)) {
+                addMatch(rep, id, { from: m.phoneFrom, text: m.smsText, code: m.smsCode, at: m.receivedAt });
+              }
+            }
+            if ((d.data || []).length < PAGE_SIZE || d.meta?.hasMore === false) { rep.queue.shift(); break; }
+          }
+          await this.storage.put("report", rep);
+        }
+        if (rep.queue.length) return true;
+      }
+    } catch (e) {
+      await this.storage.delete("report");
+      await this.send(`⚠️ Σφάλμα στο ${rep.type === "list" ? "/list" : "/scan"}: ${e.message}`);
+      return false;
+    }
+    await this.storage.delete("report");
+    await (rep.type === "list" ? this.sendList(rep) : this.sendScan(rep));
+    return false;
+  }
+
+  async sendList(rep) {
+    const now = new Date(this.now()).toISOString();
+    const active = rep.items.filter(a => !a.expiredAt || a.expiredAt > now)
+      .sort((a, b) => String(b.createdAt).localeCompare(String(a.createdAt)));
+    if (!active.length) return this.send("📋 Δεν υπάρχουν ενεργοί αριθμοί.");
+    const lines = active.map((a, i) =>
+      `${i + 1}. +${a.phone} · ${fmtDate(a.createdAt)} → ${fmtDate(a.expiredAt)}${a.otpCount ? ` · 📩 ${a.otpCount}` : ""}`);
+    await this.sendLines(`📋 Ενεργοί αριθμοί: ${active.length} (νεότερος → παλαιότερος)\nαγορά → λήξη · 📩 = SMS`, lines);
+  }
+
+  async sendScan(rep) {
+    const now = new Date(this.now()).toISOString();
+    const active = rep.items.filter(a => !a.expiredAt || a.expiredAt > now);
+    const byId = Object.fromEntries(active.map(a => [a.id, a]));
+    const hits = Object.entries(rep.matches).filter(([id]) => byId[id])
+      .map(([id, ms]) => ({ a: byId[id], ms: ms.sort((x, y) => String(y.at).localeCompare(String(x.at))) }))
+      .sort((x, y) => String(y.ms[0].at).localeCompare(String(x.ms[0].at)));
+    const withSms = active.filter(a => a.otpCount > 0).length;
+    if (!hits.length) {
+      return this.send(`🔎 Κανένας αριθμός δεν έχει λάβει SMS από «${rep.sender}».\n` +
+        `Σαρώθηκαν ${active.length} ενεργοί αριθμοί (${withSms} με SMS).`);
+    }
+    const lines = hits.map(({ a, ms }, i) => {
+      const m = ms[0];
+      // Το HeroSMS βάζει συχνά όλο το μήνυμα στο «code»: κωδικός μόνο αν είναι πραγματικά σύντομος.
+      const code = String(m.code || "").trim();
+      const text = cleanText(m.text || code);
+      const what = /^[\w-]{3,10}$/.test(code) ? `κωδικός ${code}` : `«${text.length > 100 ? text.slice(0, 100) + "…" : text}»`;
+      return `${i + 1}. +${a.phone} · ${fmtDate(m.at)} · ${what}${ms.length > 1 ? ` (${ms.length} SMS)` : ""}`;
+    });
+    await this.sendLines(`🔎 SMS από «${rep.sender}»: ${hits.length} αριθμοί\n` +
+      `(σαρώθηκαν ${active.length} ενεργοί, ${withSms} με SMS · νεότερο → παλαιότερο)`, lines);
+  }
+
+  /** Στέλνει μια λίστα σε όσα μηνύματα χρειάζονται (όριο Telegram: 4096 χαρακτήρες). */
+  async sendLines(header, lines) {
+    let msg = header + "\n";
+    for (const line of lines) {
+      if (msg.length + line.length + 1 > 3900) { await this.send(msg.trim()); msg = ""; }
+      msg += "\n" + line;
+    }
+    if (msg.trim()) await this.send(msg.trim());
   }
 
   async finish(job) {
@@ -389,6 +535,45 @@ export class Bot {
       await this.storage.put("sent", sent);
     }
   }
+}
+
+/** Κρατά μόνο ό,τι χρειάζεται από έναν αριθμό του /activations. */
+function compact(a) {
+  const o = a.otpLast;
+  return {
+    id: String(a.id), phone: String(a.phone), createdAt: a.createdAt, expiredAt: a.expiredAt,
+    otpCount: Number(a.otpTotalCount || 0),
+    last: o ? { from: o.phoneFrom, text: o.smsText, code: o.smsCode, at: o.receivedAt } : null,
+  };
+}
+
+/** Κείμενο SMS σε μία γραμμή, χωρίς HTML entities (&#10; &#38; &amp; ...). */
+function cleanText(s) {
+  const named = { amp: "&", lt: "<", gt: ">", quot: '"', apos: "'", nbsp: " " };
+  return String(s)
+    .replace(/&#(\d+);/g, (_, n) => String.fromCodePoint(Number(n)))
+    .replace(/&#x([0-9a-f]+);/gi, (_, n) => String.fromCodePoint(parseInt(n, 16)))
+    .replace(/&(amp|lt|gt|quot|apos|nbsp);/g, (_, n) => named[n])
+    .replace(/\s+/g, " ").trim();
+}
+
+function sameSender(from, sender) {
+  const norm = s => String(s || "").replace(/\s+/g, "").toUpperCase();
+  return norm(from) === norm(sender);
+}
+
+function addMatch(rep, id, sms) {
+  const list = (rep.matches[id] ||= []);
+  if (!list.some(m => m.at === sms.at && m.text === sms.text)) list.push(sms);
+}
+
+/** '2026-10-21T18:03:34Z' -> '21/10 21:03' (ώρα Ελλάδας) */
+function fmtDate(iso) {
+  if (!iso) return "—";
+  const p = Object.fromEntries(new Intl.DateTimeFormat("en-GB", {
+    timeZone: "Europe/Athens", day: "2-digit", month: "2-digit", hour: "2-digit", minute: "2-digit", hour12: false,
+  }).formatToParts(new Date(iso)).map(x => [x.type, x.value]));
+  return `${p.day}/${p.month} ${p.hour}:${p.minute}`;
 }
 
 function period(hours) {
