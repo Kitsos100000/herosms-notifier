@@ -8,7 +8,9 @@ const STEP_BUDGET = 35;       // κλήσεις HeroSMS ανά εκτέλεση 
 const DEFAULT_SENDER = "PREDICT2WIN";
 export const CHECK_TEXT = "🔍 Έλεγχος τώρα";
 export const CLEAN_TEXT = "📋 Καθαρή λίστα";
-const MENU = { keyboard: [[{ text: CHECK_TEXT }, { text: CLEAN_TEXT }]], resize_keyboard: true, is_persistent: true };
+// Χωρίς κουμπιά κάτω από το πεδίο γραφής: όλα γίνονται από το Menu του bot (setMyCommands).
+// Τα κείμενα των παλιών κουμπιών γίνονται ακόμα δεκτά, αν σταλούν.
+const NO_KEYBOARD = { remove_keyboard: true };
 const CONFIRM_TTL = 5 * 60;   // δευτ.: το κουμπί «Επιβεβαίωση» λήγει μετά από 5 λεπτά
 const ASK_TTL = 30 * 60;      // δευτ.: πόσο περιμένει να γράψεις ποσότητα
 const BATCH = 20;             // αγορές ανά εκτέλεση (το δωρεάν πλάνο επιτρέπει 50 εξωτερικές κλήσεις)
@@ -276,11 +278,12 @@ export class Bot {
       return this.manualCheck();
     }
     if (text === "/start") {
-      return this.send(`Πάτα «${CHECK_TEXT}» όποτε θες να ελέγξεις τη διαθεσιμότητα.\n` +
-        "Εντολές:\n/list – ενεργοί αριθμοί (νεότερος → παλαιότερος)\n" +
-        `/clean ή «${CLEAN_TEXT}» – μόνο οι αριθμοί (69xxxxxxxx), ένας ανά γραμμή\n` +
+      return this.send("Όλες οι εντολές είναι στο Menu του bot:\n" +
+        "/check – έλεγχος διαθεσιμότητας τώρα\n" +
+        "/list – ενεργοί αριθμοί (νεότερος → παλαιότερος)\n" +
+        "/clean – μόνο οι αριθμοί (69xxxxxxxx), ένας ανά γραμμή\n" +
         `/scan – ποιοι αριθμοί έλαβαν SMS από ${DEFAULT_SENDER} (ή /scan ΑΠΟΣΤΟΛΕΑΣ)\n` +
-        "/balance – υπόλοιπο\n/demo – δοκιμή με εικονικές αγορές", null, { reply_markup: MENU });
+        "/balance – υπόλοιπο\n/demo – δοκιμή με εικονικές αγορές", null, { reply_markup: NO_KEYBOARD });
     }
     const [cmd, ...args] = text.split(/\s+/);
     const command = cmd.toLowerCase().replace(/@.*$/, ""); // π.χ. /list@Kitsos_HeroSMS_bot

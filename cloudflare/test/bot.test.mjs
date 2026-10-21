@@ -213,7 +213,7 @@ test("Έλεγχος τώρα, /start, /balance", async () => {
   await w.type("/check");
   assert.match(w.last().text, /Δεν υπάρχουν διαθέσιμοι τώρα/);
   await w.type("/start");
-  assert.deepEqual(w.last().reply_markup.keyboard, [[{ text: CHECK_TEXT }, { text: CLEAN_TEXT }]]);
+  assert.deepEqual(w.last().reply_markup, { remove_keyboard: true }, "χωρίς κουμπιά, μόνο Menu");
   await w.type("/balance");
   assert.match(w.last().text, /\$16\.09/);
 });
@@ -349,7 +349,7 @@ test("Καθαρή λίστα: μόνο 69xxxxxxxx, νεότερος → παλ�
   makeActs(w, 600); // > 1 μήνυμα
   w.acts[3].expiredAt = "2026-10-20T00:00:00.000000Z";
   await w.type("/start");
-  assert.deepEqual(w.last().reply_markup.keyboard, [[{ text: CHECK_TEXT }, { text: CLEAN_TEXT }]]);
+  assert.deepEqual(w.last().reply_markup, { remove_keyboard: true }, "χωρίς κουμπιά, μόνο Menu");
   const before = w.sent.length;
   await w.type(CLEAN_TEXT);
   assert.equal(w.sent.length, before, "κανένα μήνυμα «περίμενε»");
