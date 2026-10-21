@@ -6,6 +6,7 @@ const HERO_V1 = "https://hero-sms.com/api/v1";
 const PAGE_SIZE = 25;         // μέγιστο που δέχεται το /activations
 const STEP_BUDGET = 35;       // κλήσεις HeroSMS ανά εκτέλεση για /list και /scan (όριο δωρεάν πλάνου: 50)
 const DEFAULT_SENDER = "PREDICT2WIN";
+const HERO_GAP_MS = 300;      // ελάχιστη απόσταση ανάμεσα σε αιτήσεις HeroSMS (να μη μοιάζουμε με επίθεση)
 const SNAPSHOT_TTL = 60 * 60; // δευτ.: πόσο ισχύει η λίστα του /list ή /clean για το /complete
 const FIN_CODE_TTL = 5 * 60;  // δευτ.: πόσο ισχύει ο κωδικός /confirm
 export const CHECK_TEXT = "🔍 Έλεγχος τώρα";
@@ -36,7 +37,15 @@ export class Bot {
 
   // ------------------------------------------------------------ HeroSMS
 
+  /** Περιμένει ώστε δύο αιτήσεις προς το HeroSMS να απέχουν τουλάχιστον HERO_GAP_MS. */
+  async pace() {
+    const wait = (this.lastHero || 0) + HERO_GAP_MS - Date.now();
+    if (wait > 0 && !this.env.NO_PACING) await new Promise(res => setTimeout(res, wait));
+    this.lastHero = Date.now();
+  }
+
   async hero(action, params = {}) {
+    await this.pace();
     const q = new URLSearchParams({ action, api_key: this.env.HERO_API_KEY, ...params });
     const r = await this.fetch(`${HERO_URL}?${q}`, { headers: { "User-Agent": "herosms-notifier/1.0" } });
     const body = (await r.text()).trim();
@@ -44,7 +53,7 @@ export class Bot {
     try {
       data = JSON.parse(body);
     } catch {
-      if (body.startsWith("<")) throw new HeroError(`HTTP_${r.status}`, "(το HeroSMS απάντησε με σελίδα HTML)");
+      if (body.startsWith("<")) throw new HeroError(`HTTP_${r.status}`, htmlHint(body, r));
       if (!r.ok || /^(BAD_|NO_|ERROR|WRONG_)/.test(body)) throw new HeroError(body.slice(0, 100) || `HTTP_${r.status}`);
       return body; // π.χ. "ACCESS_BALANCE:16.09"
     }
@@ -57,6 +66,7 @@ export class Bot {
 
   /** Νέο API του HeroSMS (/api/v1): λίστα αριθμών, SMS, ολοκλήρωση. Τα σφάλματα έχουν .status (HTTP). */
   async heroV1(path, params = {}, method = "GET") {
+    await this.pace();
     const q = new URLSearchParams(params);
     const r = await this.fetch(`${HERO_V1}${path}${String(q) ? `?${q}` : ""}`, {
       method,
@@ -68,7 +78,7 @@ export class Bot {
     try {
       data = JSON.parse(body);
     } catch {
-      const e = new HeroError(`HTTP_${r.status}`, body.startsWith("<") ? "(το HeroSMS απάντησε με σελίδα HTML)" : body.slice(0, 100));
+      const e = new HeroError(`HTTP_${r.status}`, body.startsWith("<") ? htmlHint(body, r) : body.slice(0, 100));
       e.status = r.ok ? 502 : r.status; // απάντηση που δεν καταλαβαίνουμε: γενικό σφάλμα
       throw e;
     }
@@ -718,6 +728,17 @@ function compact(a) {
     otpCount: Number(a.otpTotalCount || 0),
     last: o ? { from: o.phoneFrom, text: o.smsText, code: o.smsCode, at: o.receivedAt } : null,
   };
+}
+
+/** Σελίδα HTML αντί για απάντηση API (συνήθως μπλόκο Cloudflare): τίτλος + κωδικός για διάγνωση. */
+function htmlHint(body, r) {
+  const title = (body.match(/<title>([^<]*)<\/title>/i)?.[1] || "").replace(/\s+/g, " ").trim().slice(0, 80);
+  const code = body.match(/Error code:?\s*(\d{4})/i)?.[1] || body.match(/error-(\d{4})/)?.[1];
+  const ray = r.headers?.get?.("cf-ray");
+  const kind = /rate limited|error 1015/i.test(body) ? "όριο ρυθμού"
+    : /you have been blocked|error 1020|access denied/i.test(body) ? "μπλόκο τείχους προστασίας"
+    : /challenge|enable javascript|verify you are human/i.test(body) ? "έλεγχος bot" : "";
+  return `(σελίδα HTML${title ? `: «${title}»` : ""}${kind ? `, ${kind}` : ""}${code ? `, κωδικός ${code}` : ""}${ray ? `, ray ${ray}` : ""})`;
 }
 
 /** Κείμενο SMS σε μία γραμμή, χωρίς HTML entities (&#10; &#38; &amp; ...). */

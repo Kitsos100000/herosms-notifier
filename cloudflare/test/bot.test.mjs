@@ -5,7 +5,7 @@ import assert from "node:assert/strict";
 import { Bot, CHECK_TEXT, CLEAN_TEXT } from "../src/bot.js";
 
 const KEY = "ot:129:168";
-const ENV = { HERO_API_KEY: "k", TELEGRAM_BOT_TOKEN: "t", TELEGRAM_CHAT_ID: "555", WATCH: "ot:129:168" };
+const ENV = { HERO_API_KEY: "k", TELEGRAM_BOT_TOKEN: "t", TELEGRAM_CHAT_ID: "555", WATCH: "ot:129:168", NO_PACING: "1" };
 
 function world({ offer = [0.13, 300], balance = 16.09, failAfter = null, heroDown = false, env = {} } = {}) {
   const w = { offer, balance, failAfter, heroDown, bought: 0, sent: [], edits: [], alarms: [], clock: 1_800_000_000_000, nextId: 1 };
@@ -232,7 +232,7 @@ test("σφάλματα HeroSMS: μία ειδοποίηση όταν χαλάσ�
   for (let i = 0; i < 8; i++) await w.bot.cron();
   assert.equal(w.sent.length, 1);
   assert.match(w.sent[0].text, /αποτυγχάνει/);
-  assert.match(w.sent[0].text, /HTTP_403/);
+  assert.match(w.sent[0].text, /HTTP_403 \(σελίδα HTML/);
   w.heroDown = false; w.offer = null;
   await w.bot.cron();
   assert.match(w.last().text, /λειτουργεί ξανά/);
