@@ -2,7 +2,7 @@
 // Εκτέλεση: node --test test/
 import test from "node:test";
 import assert from "node:assert/strict";
-import { Bot, CHECK_TEXT } from "../src/bot.js";
+import { Bot, CHECK_TEXT, CLEAN_TEXT } from "../src/bot.js";
 
 const KEY = "ot:129:168";
 const ENV = { HERO_API_KEY: "k", TELEGRAM_BOT_TOKEN: "t", TELEGRAM_CHAT_ID: "555", WATCH: "ot:129:168" };
@@ -213,7 +213,7 @@ test("Έλεγχος τώρα, /start, /balance", async () => {
   await w.type("/check");
   assert.match(w.last().text, /Δεν υπάρχουν διαθέσιμοι τώρα/);
   await w.type("/start");
-  assert.deepEqual(w.last().reply_markup.keyboard, [[{ text: CHECK_TEXT }]]);
+  assert.deepEqual(w.last().reply_markup.keyboard, [[{ text: CHECK_TEXT }, { text: CLEAN_TEXT }]]);
   await w.type("/balance");
   assert.match(w.last().text, /\$16\.09/);
 });
@@ -342,4 +342,27 @@ test("/list και /scan: σφάλμα, διπλή εντολή, συνύπαρ�
   assert.ok(w.sent.some(m => /Ενεργοί αριθμοί: 3/.test(m.text)));
   assert.equal(await w.storage.get("job"), undefined);
   assert.equal(await w.storage.get("report"), undefined);
+});
+
+test("Καθαρή λίστα: μόνο 69xxxxxxxx, νεότερος → παλαιότερος, χωρίς τίποτα άλλο", async () => {
+  const w = world();
+  makeActs(w, 600); // > 1 μήνυμα
+  w.acts[3].expiredAt = "2026-10-20T00:00:00.000000Z";
+  await w.type("/start");
+  assert.deepEqual(w.last().reply_markup.keyboard, [[{ text: CHECK_TEXT }, { text: CLEAN_TEXT }]]);
+  const before = w.sent.length;
+  await w.type(CLEAN_TEXT);
+  assert.equal(w.sent.length, before, "κανένα μήνυμα «περίμενε»");
+  await w.runAlarms();
+  const msgs = w.sent.slice(before).map(m => m.text);
+  assert.ok(msgs.length >= 2 && msgs.every(m => m.length <= 4096));
+  const lines = msgs.join("\n").split("\n");
+  assert.equal(lines.length, 599);
+  assert.ok(lines.every(l => /^69\d{8}$/.test(l)), "μόνο αριθμοί 69xxxxxxxx");
+  assert.equal(lines[0], "6900000000");
+  assert.equal(lines.at(-1), "6900000599");
+  assert.ok(!lines.includes("6900000003"), "χωρίς τον ληγμένο");
+  await w.type("/clean");
+  await w.runAlarms();
+  assert.equal(w.last().text.split("\n").at(-1), "6900000599");
 });

@@ -7,7 +7,8 @@ const PAGE_SIZE = 25;         // μέγιστο που δέχεται το /acti
 const STEP_BUDGET = 35;       // κλήσεις HeroSMS ανά εκτέλεση για /list και /scan (όριο δωρεάν πλάνου: 50)
 const DEFAULT_SENDER = "PREDICT2WIN";
 export const CHECK_TEXT = "🔍 Έλεγχος τώρα";
-const MENU = { keyboard: [[{ text: CHECK_TEXT }]], resize_keyboard: true, is_persistent: true };
+export const CLEAN_TEXT = "📋 Καθαρή λίστα";
+const MENU = { keyboard: [[{ text: CHECK_TEXT }, { text: CLEAN_TEXT }]], resize_keyboard: true, is_persistent: true };
 const CONFIRM_TTL = 5 * 60;   // δευτ.: το κουμπί «Επιβεβαίωση» λήγει μετά από 5 λεπτά
 const ASK_TTL = 30 * 60;      // δευτ.: πόσο περιμένει να γράψεις ποσότητα
 const BATCH = 20;             // αγορές ανά εκτέλεση (το δωρεάν πλάνο επιτρέπει 50 εξωτερικές κλήσεις)
@@ -277,12 +278,14 @@ export class Bot {
     if (text === "/start") {
       return this.send(`Πάτα «${CHECK_TEXT}» όποτε θες να ελέγξεις τη διαθεσιμότητα.\n` +
         "Εντολές:\n/list – ενεργοί αριθμοί (νεότερος → παλαιότερος)\n" +
+        `/clean ή «${CLEAN_TEXT}» – μόνο οι αριθμοί (69xxxxxxxx), ένας ανά γραμμή\n` +
         `/scan – ποιοι αριθμοί έλαβαν SMS από ${DEFAULT_SENDER} (ή /scan ΑΠΟΣΤΟΛΕΑΣ)\n` +
         "/balance – υπόλοιπο\n/demo – δοκιμή με εικονικές αγορές", null, { reply_markup: MENU });
     }
     const [cmd, ...args] = text.split(/\s+/);
     const command = cmd.toLowerCase().replace(/@.*$/, ""); // π.χ. /list@Kitsos_HeroSMS_bot
     if (command === "/list") return this.startReport("list");
+    if (command === "/clean" || text === CLEAN_TEXT) return this.startReport("clean");
     if (command === "/scan") return this.startReport("scan", args.join(" ") || this.env.SCAN_SENDER || DEFAULT_SENDER);
     if (text === "/balance") return this.send(`💰 Υπόλοιπο HeroSMS: $${(await this.getBalance()).toFixed(2)}`);
     if (text === "/demo") {
@@ -399,7 +402,9 @@ export class Bot {
   async startReport(type, sender = null) {
     if (await this.storage.get("report")) return this.send("⏳ Υπάρχει ήδη λίστα/σάρωση σε εξέλιξη. Περίμενε λίγο.");
     await this.storage.put("report", { type, sender, page: 1, total: null, listed: false, items: [], queue: null, matches: {} });
-    await this.send(type === "list" ? "⏳ Διαβάζω τους ενεργούς αριθμούς…" : `⏳ Σαρώνω τα SMS όλων των αριθμών για «${sender}»…`);
+    if (type === "list") await this.send("⏳ Διαβάζω τους ενεργούς αριθμούς…");
+    if (type === "scan") await this.send(`⏳ Σαρώνω τα SMS όλων των αριθμών για «${sender}»…`);
+    // η «clean» δεν στέλνει τίποτα άλλο εκτός από τους αριθμούς
     await this.storage.setAlarm(this.now());
   }
 
@@ -451,18 +456,37 @@ export class Bot {
       }
     } catch (e) {
       await this.storage.delete("report");
-      await this.send(`⚠️ Σφάλμα στο ${rep.type === "list" ? "/list" : "/scan"}: ${e.message}`);
+      await this.send(`⚠️ Σφάλμα στο /${rep.type}: ${e.message}`);
       return false;
     }
     await this.storage.delete("report");
-    await (rep.type === "list" ? this.sendList(rep) : this.sendScan(rep));
+    if (rep.type === "list") await this.sendList(rep);
+    else if (rep.type === "clean") await this.sendClean(rep);
+    else await this.sendScan(rep);
     return false;
   }
 
-  async sendList(rep) {
+  /** Ενεργοί αριθμοί, νεότερος → παλαιότερος. */
+  activeItems(rep) {
     const now = new Date(this.now()).toISOString();
-    const active = rep.items.filter(a => !a.expiredAt || a.expiredAt > now)
+    return rep.items.filter(a => !a.expiredAt || a.expiredAt > now)
       .sort((a, b) => String(b.createdAt).localeCompare(String(a.createdAt)));
+  }
+
+  /** Μόνο οι αριθμοί σε μορφή 69xxxxxxxx, ένας ανά γραμμή, χωρίς τίποτα άλλο. */
+  async sendClean(rep) {
+    const active = this.activeItems(rep);
+    if (!active.length) return this.send("📋 Δεν υπάρχουν ενεργοί αριθμοί.");
+    let msg = "";
+    for (const line of active.map(a => localPhone(a.phone))) {
+      if (msg.length + line.length + 1 > 4000) { await this.send(msg); msg = ""; }
+      msg += (msg ? "\n" : "") + line;
+    }
+    if (msg) await this.send(msg);
+  }
+
+  async sendList(rep) {
+    const active = this.activeItems(rep);
     if (!active.length) return this.send("📋 Δεν υπάρχουν ενεργοί αριθμοί.");
     const lines = active.map((a, i) =>
       `${i + 1}. +${a.phone} · ${fmtDate(a.createdAt)} → ${fmtDate(a.expiredAt)}${a.otpCount ? ` · 📩 ${a.otpCount}` : ""}`);
@@ -535,6 +559,12 @@ export class Bot {
       await this.storage.put("sent", sent);
     }
   }
+}
+
+/** 306912345678 -> 6912345678 (χωρίς το +30 της Ελλάδας) */
+function localPhone(phone) {
+  const p = String(phone).replace(/\D/g, "");
+  return p.startsWith("30") && p.length === 12 ? p.slice(2) : p;
 }
 
 /** Κρατά μόνο ό,τι χρειάζεται από έναν αριθμό του /activations. */
