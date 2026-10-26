@@ -636,13 +636,17 @@ export class Bot {
       return this.send(`🔎 Κανένας αριθμός δεν έχει λάβει SMS από «${rep.sender}».\n` +
         `Σαρώθηκαν ${active.length} ενεργοί αριθμοί (${withSms} με SMS).`);
     }
+    // Κάθε αριθμός με ΟΛΑ τα μηνύματα του αποστολέα, ολόκληρα (νεότερο πρώτο).
     const lines = hits.map(({ a, ms }, i) => {
-      const m = ms[0];
-      // Το HeroSMS βάζει συχνά όλο το μήνυμα στο «code»: κωδικός μόνο αν είναι πραγματικά σύντομος.
-      const code = String(m.code || "").trim();
-      const text = cleanText(m.text || code);
-      const what = /^[\w-]{3,10}$/.test(code) ? `κωδικός ${code}` : `«${text.length > 100 ? text.slice(0, 100) + "…" : text}»`;
-      return `${i + 1}. +${a.phone} · ${fmtDate(m.at)} · ${what}${ms.length > 1 ? ` (${ms.length} SMS)` : ""}`;
+      const smsBlocks = ms.map(m => {
+        // Το HeroSMS βάζει συχνά όλο το μήνυμα στο «code»: αν δεν υπάρχει text, το μήνυμα είναι εκεί.
+        const text = fullText(m.text || m.code || "");
+        const code = String(m.code || "").trim();
+        const codeLine = /^[\w-]{3,10}$/.test(code) && code !== text ? `\n🔑 Κωδικός: ${code}` : "";
+        return `🕒 ${fmtDate(m.at)}${codeLine}\n${text || "(χωρίς κείμενο)"}`;
+      });
+      const block = `━━━━━━━━━━\n${i + 1}. +${a.phone}${ms.length > 1 ? ` · ${ms.length} SMS` : ""}\n` + smsBlocks.join("\n\n");
+      return block.length > 3800 ? block.slice(0, 3800) + "…" : block; // ένα μήνυμα Telegram χωράει έως 4096
     });
     await this.sendLines(`🔎 SMS από «${rep.sender}»: ${hits.length} αριθμοί\n` +
       `(σαρώθηκαν ${active.length} ενεργοί, ${withSms} με SMS · νεότερο → παλαιότερο)`, lines);
@@ -741,14 +745,14 @@ function htmlHint(body, r) {
   return `(σελίδα HTML${title ? `: «${title}»` : ""}${kind ? `, ${kind}` : ""}${code ? `, κωδικός ${code}` : ""}${ray ? `, ray ${ray}` : ""})`;
 }
 
-/** Κείμενο SMS σε μία γραμμή, χωρίς HTML entities (&#10; &#38; &amp; ...). */
-function cleanText(s) {
+/** Ολόκληρο το κείμενο του SMS, χωρίς HTML entities (&#10; &#38; &amp; ...), με τις αλλαγές γραμμής του. */
+function fullText(s) {
   const named = { amp: "&", lt: "<", gt: ">", quot: '"', apos: "'", nbsp: " " };
   return String(s)
     .replace(/&#(\d+);/g, (_, n) => String.fromCodePoint(Number(n)))
     .replace(/&#x([0-9a-f]+);/gi, (_, n) => String.fromCodePoint(parseInt(n, 16)))
     .replace(/&(amp|lt|gt|quot|apos|nbsp);/g, (_, n) => named[n])
-    .replace(/\s+/g, " ").trim();
+    .replace(/\r\n?/g, "\n").replace(/[ \t]+\n/g, "\n").replace(/\n{3,}/g, "\n\n").trim();
 }
 
 function sameSender(from, sender) {

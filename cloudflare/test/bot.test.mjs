@@ -309,8 +309,10 @@ test("/scan: βρίσκει PREDICT2WIN σε τελευταίο SMS και σε 
   assert.match(out, /5 με SMS/);
   const order = [...out.matchAll(/\+(\d+)/g)].map(m => m[1]);
   assert.deepEqual(order, ["306900000008", "306900000004", "306900000001"], "νεότερο SMS πρώτα");
-  assert.match(out, /\+306900000008 · 21\/10 21:40 · κωδικός 2222 \(2 SMS\)/);
-  assert.match(out, /«Welcome to Predict2Win»/);
+  assert.match(out, /\+306900000008 · 2 SMS\n🕒 21\/10 21:40\n🔑 Κωδικός: 2222\ncode 2222\n\n🕒 21\/10 21:01\n🔑 Κωδικός: 0000\ncode 0000/,
+    "όλα τα SMS του αποστολέα, ολόκληρα, νεότερο πρώτο");
+  assert.match(out, /\+306900000004\n🕒 21\/10 21:25\nWelcome to Predict2Win/);
+  assert.ok(!/frog/.test(out), "όχι μηνύματα άλλων αποστολέων");
   assert.equal(w.v1calls, 2 + 2, "2 σελίδες + 2 αριθμοί με πολλά SMS");
 });
 
@@ -535,4 +537,21 @@ test("/complete: πολλοί αριθμοί σε βήματα, διπλό updat
   await w.runAlarms();
   assert.equal(w.finished.length, 100);
   assert.equal(new Set(w.finished).size, 100, "καμία διπλή ολοκλήρωση");
+});
+
+
+test("/scan: ολόκληρο μεγάλο μήνυμα, με αλλαγές γραμμής και χωρίς HTML entities", async () => {
+  const w = world();
+  makeActs(w, 2);
+  const long = "ΣYΓXAPHTHPIA! &#10;EIΣAI ENAΣ AΠO TOYΣ MEΓAΛOYΣ NIKHTEΣ TOY ΠPOBΛEΠEIΣ &#38; KEPΔIZEIΣ AΠO TO ΠAME ΣTOIXHMA KAI KEPΔIΣEΣ 1 Public Voucher AΞIAΣ 50€! &#10;EΠIKOINΩNHΣE ME TO TMHMA ΔΩPΩN THΣ ALLWYN ΣTO 210 9525255, KAΘHMEPINA 11:00 ME 15:00, EΩΣ 23/10/2026.";
+  w.acts[0].otpLast = { ...sms("PREDICT2WIN", null, "2026-10-21T11:30:00Z"), smsCode: long }; // όπως το HeroSMS: όλο το μήνυμα στο code
+  w.acts[0].otpTotalCount = 1;
+  await w.type("/scan");
+  await w.runAlarms();
+  const out = w.last().text;
+  assert.ok(out.includes("ΣYΓXAPHTHPIA!\nEIΣAI ENAΣ"), "αλλαγή γραμμής αντί για &#10;");
+  assert.ok(out.includes("ΠPOBΛEΠEIΣ & KEPΔIZEIΣ"), "& αντί για &#38;");
+  assert.ok(out.includes("EΩΣ 23/10/2026."), "ολόκληρο, ως το τέλος");
+  assert.ok(!out.includes("…") && !out.includes("&#"), "χωρίς κόψιμο και entities");
+  assert.ok(!out.includes("🔑"), "όχι «κωδικός» όταν το code είναι όλο το μήνυμα");
 });
