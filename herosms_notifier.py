@@ -21,7 +21,7 @@ import urllib.parse
 import urllib.request
 from pathlib import Path
 
-HERO_URL = "https://hero-sms.com/stubs/handler_api.php"
+HERO_URL = "https://hero-sms.io/stubs/handler_api.php"
 ENV_FILE = Path(__file__).with_name(".env")
 STATE_FILE = Path(__file__).with_name("state.json")
 CONFIG_KEYS = ("HERO_API_KEY", "TELEGRAM_BOT_TOKEN", "TELEGRAM_CHAT_ID", "WATCH", "MAX_PRICE",
@@ -189,7 +189,7 @@ def alert(cfg, key, offer, demo=False, title="🔔 Διαθέσιμο στο Her
     price, qty = offer
     head = "🧪 DEMO – εικονική ειδοποίηση\n" if demo else ""
     text = (f"{head}{title}\n{label(key)}\n"
-            f"Ποσότητα: {qty} αριθμοί\nΤιμή: ${price}\nhttps://hero-sms.com")
+            f"Ποσότητα: {qty} αριθμοί\nΤιμή: ${price}\nhttps://hero-sms.io")
     buttons = buy_buttons(key, qty, demo) if parse_key(key)[2] else None  # αγορά μόνο για ενοικιάσεις
     send(cfg, text, buttons)
 

@@ -1,8 +1,8 @@
 // Λογική του bot: έλεγχος διαθεσιμότητας HeroSMS, ειδοποιήσεις και αγορές από το Telegram.
 // Δεν εξαρτάται από το Cloudflare (παίρνει storage/env/fetch απ' έξω), ώστε να δοκιμάζεται σε Node.
 
-const HERO_URL = "https://hero-sms.com/stubs/handler_api.php";
-const HERO_V1 = "https://hero-sms.com/api/v1";
+// Διεύθυνση του HeroSMS: ρύθμιση HERO_BASE στο wrangler.toml (το hero-sms.com έπαψε να υπάρχει, 10/2026).
+const DEFAULT_HERO_BASE = "https://hero-sms.io";
 const PAGE_SIZE = 25;         // μέγιστο που δέχεται το /activations
 const STEP_BUDGET = 35;       // κλήσεις HeroSMS ανά εκτέλεση για /list και /scan (όριο δωρεάν πλάνου: 50)
 const DEFAULT_SENDER = "PREDICT2WIN";
@@ -37,6 +37,10 @@ export class Bot {
 
   // ------------------------------------------------------------ HeroSMS
 
+  heroBase() {
+    return String(this.env.HERO_BASE || DEFAULT_HERO_BASE).replace(/\/+$/, "");
+  }
+
   /** Περιμένει ώστε δύο αιτήσεις προς το HeroSMS να απέχουν τουλάχιστον HERO_GAP_MS. */
   async pace() {
     const wait = (this.lastHero || 0) + HERO_GAP_MS - Date.now();
@@ -47,7 +51,7 @@ export class Bot {
   async hero(action, params = {}) {
     await this.pace();
     const q = new URLSearchParams({ action, api_key: this.env.HERO_API_KEY, ...params });
-    const r = await this.fetch(`${HERO_URL}?${q}`, { headers: { "User-Agent": "herosms-notifier/1.0" } });
+    const r = await this.fetch(`${this.heroBase()}/stubs/handler_api.php?${q}`, { headers: { "User-Agent": "herosms-notifier/1.0" } });
     const body = (await r.text()).trim();
     let data;
     try {
@@ -68,7 +72,7 @@ export class Bot {
   async heroV1(path, params = {}, method = "GET") {
     await this.pace();
     const q = new URLSearchParams(params);
-    const r = await this.fetch(`${HERO_V1}${path}${String(q) ? `?${q}` : ""}`, {
+    const r = await this.fetch(`${this.heroBase()}/api/v1${path}${String(q) ? `?${q}` : ""}`, {
       method,
       headers: { Authorization: `ApiKey ${this.env.HERO_API_KEY}`, "User-Agent": "herosms-notifier/1.0" },
     });
@@ -189,7 +193,7 @@ export class Bot {
   async alert(key, offer, demo = false, title = "🔔 Διαθέσιμο στο HeroSMS!") {
     const [price, qty] = offer;
     const head = demo ? "🧪 DEMO – εικονική ειδοποίηση\n" : "";
-    const text = `${head}${title}\n${await this.label(key)}\nΠοσότητα: ${qty} αριθμοί\nΤιμή: $${price}\nhttps://hero-sms.com`;
+    const text = `${head}${title}\n${await this.label(key)}\nΠοσότητα: ${qty} αριθμοί\nΤιμή: $${price}\n${this.heroBase()}`;
     const buttons = Bot.parseKey(key).hours ? Bot.buyButtons(key, qty, demo) : null; // αγορά μόνο για ενοικιάσεις
     await this.send(text, buttons);
   }

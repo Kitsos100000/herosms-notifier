@@ -20,7 +20,7 @@ function world({ offer = [0.13, 300], balance = 16.09, failAfter = null, heroDow
   const text = (s, status = 200) => ({ ok: status < 400, status, text: async () => s });
   w.acts = []; w.otps = {}; w.v1calls = 0; w.finished = []; w.finishErr = {};
   w.fetch = async (url, init) => {
-    if (url.startsWith("https://hero-sms.com/api/v1")) {
+    if (url.startsWith("https://hero-sms.io/api/v1")) {
       w.v1calls++;
       assert.match(init.headers.Authorization, /^ApiKey /);
       assert.notEqual(init.method, "DELETE", "ποτέ ακύρωση (Cancel)");
@@ -40,7 +40,7 @@ function world({ offer = [0.13, 300], balance = 16.09, failAfter = null, heroDow
       const data = all.slice((page - 1) * size, page * size);
       return json({ data, meta: { page, size, total: all.length } }); // το πραγματικό API δεν στέλνει hasMore εδώ
     }
-    if (url.startsWith("https://hero-sms.com")) {
+    if (url.startsWith("https://hero-sms.io")) {
       if (w.heroDown) return text("<html>challenge</html>", 403);
       const p = new URL(url).searchParams;
       const action = p.get("action");
